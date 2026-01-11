@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>SDF Runtime</title>
+<script src="https://cdn.jsdelivr.net/npm/mathjs@11/lib/browser/math.js"></script>
+<style>
+body { margin: 0; background: #111; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<script>
+/* ================= 基本設定 ================= */
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+let W, H, dpr;
+function resize() {
+  dpr = devicePixelRatio || 1;
+  W = innerWidth;
+  H = innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener("resize", resize);
+resize();
+
+/* ================= SDF 基本関数 ================= */
+
+function sdCircle(x, y, r) {
+  return Math.hypot(x, y) - r;
+}
+
+function sdBox(x, y, w, h) {
+  return Math.max(Math.abs(x) - w, Math.abs(y) - h);
+}
+
+function combine(d1, d2, op) {
+  if (op === "intersect") return Math.max(d1, d2);
+  if (op === "subtract")  return Math.max(d1, -d2);
+  return Math.min(d1, d2); // union
+}
+
+/* ================= SDF ローダ ================= */
+
+async function loadSDF(url) {
+  const res = await fetch(url);
+  const def = await res.json();
+
+  const globals = {};
+  for (const k in def.globals || {}) {
+    globals[k] = math.compile(def.globals[k]);
+  }
+
+  const shapes = def.shapes.map(s => {
+    const compiled = {};
+    for (const k in s) {
+      if (typeof s[k] === "string") {
+        compiled[k] = math.compile(s[k]);
+      }
+    }
+    return { raw: s, compiled };
+  });
+
+  return { def, globals, shapes };
+}
+
+/* ================= SDF 評価関数 ================= */
+
+function buildEvaluator(data) {
+  return function(x, y, t, params) {
+    let d = Infinity;
+
+    const scopeBase = { x, y, t, params };
+
+    const gvals = {};
+    for (const k in data.globals) {
+      gvals[k] = data.globals[k].evaluate(scopeBase);
+    }
+
+    for (const s of data.shapes) {
+      const sc = { ...scopeBase, ...gvals };
+
+      const X = s.compiled.x?.evaluate(sc) || 0;
+      const Y = s.compiled.y?.evaluate(sc) || 0;
+
+      let ds = Infinity;
+      if (s.raw.type === "circle") {
+        const r = s.compiled.r.evaluate(sc);
+        ds = sdCircle(x - X, y - Y, r);
+      }
+      if (s.raw.type === "box") {
+        const w = s.compiled.w.evaluate(sc);
+        const h = s.compiled.h.evaluate(sc);
+        ds = sdBox(x - X, y - Y, w, h);
+      }
+
+      d = combine(d, ds, s.raw.op);
+    }
+
+    return d;
+  };
+}
+
+/* ================= 描画 ================= */
+
+let evaluator, params;
+
+function render(t) {
+  t *= 0.001;
+
+  const img = ctx.createImageData(W, H);
+  const buf = img.data;
+
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      const x = (px / W - 0.5) * 2 * W / H;
+      const y = (0.5 - py / H) * 2;
+
+      const d = evaluator(x, y, t, params);
+      const i = (py * W + px) * 4;
+
+      if (d < 0) {
+        buf[i]   = 80;
+        buf[i+1] = 150;
+        buf[i+2] = 255;
+        buf[i+3] = 255;
+      } else {
+        const e = Math.exp(-d * 40);
+        buf[i] = buf[i+1] = buf[i+2] = e * 255;
+        buf[i+3] = 255;
+      }
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+  requestAnimationFrame(render);
+}
+
+/* ================= 起動 ================= */
+
+(async () => {
+  const data = await loadSDF("sample.sdf.json");
+  evaluator = buildEvaluator(data);
+  params = data.def.params || {};
+  render(0);
+})();
+</script>
+
+</body>
+</html>
